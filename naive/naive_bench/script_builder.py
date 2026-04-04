@@ -172,6 +172,7 @@ def build_benchmark_phase_script(
     *,
     baseline_compile: CompileCommands,
     runs: int,
+    n_tests: int,
     exec_timeout_s: float,
     skip_compile: bool,
     has_reference: bool,
@@ -184,6 +185,24 @@ def build_benchmark_phase_script(
     compile_block = _compile_block(baseline_compile, skip_compile=skip_compile)
 
     opt_labels = ("O0", "O1", "O2", "O3")
+    run_one_binary_body = ""
+    if n_tests > 0:
+        run_one_binary_body = """
+for i in $(seq 0 $((N_TESTS - 1))); do
+  timeout "${EXEC_TIMEOUT}s" "$1" < "tests/${i}.in" > /dev/null 2>&1 || return 1
+done
+""".strip()
+    else:
+        run_one_binary_body = """
+timeout "${EXEC_TIMEOUT}s" "$1" < timing.in > /dev/null 2>&1 || return 1
+""".strip()
+
+    run_func = f"""
+run_one_binary() {{
+{run_one_binary_body}
+}}
+""".strip()
+
     baseline_timing = ""
     if has_reference:
         parts = []
@@ -194,7 +213,7 @@ if [[ -x "./bench_{label}" ]]; then
   : > "timing_{label}.txt"
   for j in $(seq 1 "${{RUNS}}"); do
     start=$(date +%s%N)
-    timeout "${{EXEC_TIMEOUT}}s" "./bench_{label}" < timing.in > /dev/null 2>&1 || exit 4
+    run_one_binary "./bench_{label}" || exit 4
     end=$(date +%s%N)
     echo $((end - start)) >> "timing_{label}.txt"
   done
@@ -207,7 +226,7 @@ fi
 : > timing_asm.txt
 for j in $(seq 1 "${{RUNS}}"); do
   start=$(date +%s%N)
-  timeout "${{EXEC_TIMEOUT}}s" ./{C.ASM_BINARY} < timing.in > /dev/null 2>&1 || exit 4
+  run_one_binary "./{C.ASM_BINARY}" || exit 4
   end=$(date +%s%N)
   echo $((end - start)) >> timing_asm.txt
 done
@@ -221,9 +240,12 @@ cd "$ROOT"
 
 EXEC_TIMEOUT={exec_timeout_s}
 RUNS={runs}
+N_TESTS={n_tests}
 SKIP_COMPILE_FLAG={skip_compile_flag}
 
 {compile_block}
+
+{run_func}
 
 {timing_block}
 

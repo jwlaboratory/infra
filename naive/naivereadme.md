@@ -19,7 +19,6 @@ outputs:
 
 
 
-
 ## Install
 
 From the `naive/` directory (or `pip install` a wheel/sdist you build):
