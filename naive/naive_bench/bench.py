@@ -78,7 +78,12 @@ def _prepare_workspace(cfg: BenchConfig) -> Path:
 
 
 def _populate_workspace(root: Path, cfg: BenchConfig) -> None:
-    shutil.copyfile(cfg.assembly_path, root / C.ASM_SOURCE)
+    asm_dest = root / C.ASM_SOURCE
+    shutil.copyfile(cfg.assembly_path, asm_dest)
+    # Some assemblers complain if file has no final newline; normalize at copy time.
+    raw = asm_dest.read_bytes()
+    if raw and not raw.endswith(b"\n"):
+        asm_dest.write_bytes(raw + b"\n")
 
     if cfg.reference_path is not None:
         dest = root / _ref_filename(cfg.language)
@@ -358,6 +363,20 @@ def run_benchmark(cfg: BenchConfig) -> BenchOutcome:
             }
             return BenchOutcome(report=report, workspace=root, _cleanup=cleanup)
 
+        if correctness.get("enabled") and correctness.get("all_passed") is False:
+            timing = _timing_skipped("assembly_output_mismatch")
+            report = {
+                "ok": False,
+                "script_exit_code": 3,
+                "phases": phases,
+                "script_stdout": proc_correctness.stdout,
+                "script_stderr": proc_correctness.stderr,
+                "compile": compile_report,
+                "correctness": correctness,
+                "timing": timing,
+            }
+            return BenchOutcome(report=report, workspace=root, _cleanup=cleanup)
+
         if ref_name is not None:
             baseline_cmds = build_baseline_only_commands(
                 language=cfg.language,
@@ -372,6 +391,7 @@ def run_benchmark(cfg: BenchConfig) -> BenchOutcome:
         benchmark_script = build_benchmark_phase_script(
             baseline_compile=baseline_cmds,
             runs=cfg.runs,
+            n_tests=len(cfg.tests),
             exec_timeout_s=cfg.exec_timeout_s,
             skip_compile=cfg.skip_compile,
             has_reference=cfg.reference_path is not None,
