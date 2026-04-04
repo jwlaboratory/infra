@@ -1,5 +1,4 @@
 inputs:
-
 1. Assembly code (required)
 2. Reference source (optional) — compare timing against `-O0` … `-O3` baselines
 3. Number of timed iterations (default 30)
@@ -88,6 +87,8 @@ Console entry point: `naive-bench`. Module: `python -m naive_bench`.
 |------|-------------|
 | `--workspace PATH` | Use this directory as the workspace; it is **not** deleted after the run. If `--skip-compile` is **off**, the directory is **cleared** before each run. If `--skip-compile` is **on**, the directory is **not** cleared (you must place `bench_asm` and any `bench_O*` there yourself). |
 | `--pretty` | Pretty-print JSON on stdout. |
+| `--timing-summary` | Add `timing_summary` to output JSON (compact totals + mean/median per binary, and best-by-mean label). |
+| `--timing-chart` | Add `timing_chart_lines` (array of strings, one logical line each) to JSON; also prints the same chart on **stderr** with real newlines so it is easy to read in the terminal. |
 | `--exit-zero` | Process exit code is always `0`; use JSON `ok` / `script_exit_code` / `phases` for success/failure. |
 
 ### Exit codes (CLI)
@@ -214,5 +215,7 @@ naive-bench examples/abc_user_arm64.s \
   --docker-platform linux/arm64 \
   --extra-ldflags "-lstdc++" \
   --runs 10 \
+  --timing-summary \
+  --timing-chart \
   --pretty
 ```

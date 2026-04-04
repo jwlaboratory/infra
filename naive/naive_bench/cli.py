@@ -139,11 +139,125 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pretty-print JSON to stdout.",
     )
     p.add_argument(
+        "--timing-summary",
+        action="store_true",
+        help="Attach compact timing sums/means/medians under timing_summary in JSON output.",
+    )
+    p.add_argument(
+        "--timing-chart",
+        action="store_true",
+        help="Add timing_chart_lines to JSON and print a readable table + bar chart on stderr.",
+    )
+    p.add_argument(
         "--exit-zero",
         action="store_true",
         help="Always exit 0; inspect JSON for ok / script_exit_code.",
     )
     return p
+
+
+def _collect_timing_rows(report: dict) -> list[tuple[str, dict]]:
+    timing = report.get("timing", {})
+    if not timing.get("enabled"):
+        return []
+
+    rows: list[tuple[str, dict]] = []
+    assembly = timing.get("assembly")
+    if isinstance(assembly, dict) and assembly.get("count", 0):
+        rows.append(("assembly", assembly))
+
+    baselines = timing.get("baselines", {})
+    for label in ("O0", "O1", "O2", "O3"):
+        entry = baselines.get(label)
+        if isinstance(entry, dict) and entry.get("count", 0):
+            rows.append((label, entry))
+    return rows
+
+
+def _build_timing_summary(report: dict) -> dict:
+    rows = _collect_timing_rows(report)
+    if not rows:
+        return {"enabled": False}
+
+    summary_rows = []
+    for label, entry in rows:
+        samples = entry.get("samples_ns", [])
+        total_ns = int(sum(samples)) if isinstance(samples, list) else None
+        summary_rows.append(
+            {
+                "label": label,
+                "count": entry.get("count"),
+                "total_ns": total_ns,
+                "mean_ns": entry.get("mean_ns"),
+                "median_ns": entry.get("median_ns"),
+                "mean_s": entry.get("mean_s"),
+                "median_s": entry.get("median_s"),
+            }
+        )
+
+    best_by_mean = min(
+        summary_rows,
+        key=lambda x: float(x["mean_ns"]) if x.get("mean_ns") is not None else float("inf"),
+    )
+    return {
+        "enabled": True,
+        "rows": summary_rows,
+        "best_mean_label": best_by_mean["label"],
+    }
+
+
+def _build_timing_chart_lines(report: dict, *, bar_width: int = 44) -> list[str]:
+    """Readable multi-line chart: fixed columns + bar scaled to slowest mean."""
+    rows = _collect_timing_rows(report)
+    if not rows:
+        return [
+            "",
+            "(timing chart: timing disabled or no samples)",
+            "",
+        ]
+
+    table: list[tuple[str, float, float]] = []
+    for label, entry in rows:
+        mean_ns = float(entry.get("mean_ns", 0.0))
+        median_ns = float(entry.get("median_ns", 0.0))
+        table.append((label, mean_ns, median_ns))
+
+    min_mean = min(t[1] for t in table)
+    max_mean = max(t[1] for t in table)
+    min_mean = max(min_mean, 1e-9)
+    max_mean = max(max_mean, min_mean)
+
+    lines: list[str] = [
+        "",
+        "=" * 78,
+        "  TIMING CHART",
+        "  Mean / median = wall time for one full timing iteration (see timing.runs_requested).",
+        "  vs fastest = mean / smallest mean in this run. Bar length is proportional to mean (slowest = full width).",
+        "=" * 78,
+        "",
+        f"  {'Label':<12} {'Mean ms':>10} {'Median ms':>11} {'vs fastest':>12}   Bar",
+        f"  {'-' * 12} {'-' * 10} {'-' * 11} {'-' * 12}   {'-' * bar_width}",
+    ]
+
+    for label, mean_ns, median_ns in table:
+        mean_ms = mean_ns / 1_000_000.0
+        median_ms = median_ns / 1_000_000.0
+        vs = mean_ns / min_mean
+        frac = mean_ns / max_mean
+        filled = max(1, min(bar_width, int(round(frac * bar_width))))
+        bar = "#" * filled + "." * (bar_width - filled)
+        lines.append(
+            f"  {label:<12} {mean_ms:10.3f} {median_ms:11.3f} {vs:11.3f}x   {bar}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "=" * 78,
+            "",
+        ]
+    )
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -191,8 +305,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"naive-bench: {exc}", file=sys.stderr)
         return 2
 
+    if args.timing_summary:
+        outcome.report["timing_summary"] = _build_timing_summary(outcome.report)
+    chart_lines: list[str] | None = None
+    if args.timing_chart:
+        chart_lines = _build_timing_chart_lines(outcome.report)
+        outcome.report["timing_chart_lines"] = chart_lines
+
     indent = 2 if args.pretty else None
     print(json.dumps(outcome.report, indent=indent))
+
+    if chart_lines is not None:
+        print("\n".join(chart_lines), file=sys.stderr)
 
     finish(outcome)
 
