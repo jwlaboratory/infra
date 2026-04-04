@@ -30,3 +30,15 @@ Our scorer should check:
 4. Google benchmark? Isolated containers? Linux `perf` containers?
 
 We should be an open source framework people can tweak the scoring logic to their needs I think.
+Imagine you can pass in:
+ - scoring framework
+ - assembly generated code
+ - C code
+ - target hardware
+ - test cases
+
+ Output
+  - score
+  - dynamic performance metrics
+  - pass test cases / verification of code 
+  - memory, static performance metrics
