@@ -1,9 +1,24 @@
-# Naive bench — usage
+inputs:
 
-## Behavior (short)
+1. Assembly code (required)
+2. Reference source (optional) — compare timing against `-O0` … `-O3` baselines
+3. Number of timed iterations (default 30)
+4. Test cases (optional) — correctness; see **Correctness (Codeforces-style)** below
+5. Compiler / Docker options via flags (image, platform, timeouts, etc.)
 
-1. Compile **only** your assembly, run **IO tests** if provided; on failure the run stops (no `O0`–`O3`, no timing).
-2. If tests pass (or there are no tests), compile reference **`O0`–`O3`** (when `--reference` is set) and **time** assembly + baselines **N times** inside one benchmark phase (local bash or Docker).
+outputs:
+1. Correctness (optional) — per test pass/fail when tests are provided
+2. Timing data — assembly binary and, when reference source is provided, baselines at `-O0` … `-O3`
+3. Compile results — success or stderr per artifact (assembly and each baseline)
+
+## Notes
+
+- Python pip-installable package so other repos can depend on it
+- Runs in Docker to isolate toolchain and target Linux
+- this is naive so we can unblock teams requiring benchmarking
+
+
+
 
 ## Install
 
@@ -186,7 +201,7 @@ Files under `examples/`:
 
 - `examples/abc_tests.json` — provided Codeforces-style IO tests
 - `examples/abc_ref.cpp` — provided C++ reference solution
-- `examples/abc_user_arm64.s` — provided ARM64 assembly sample
+- `examples/abc_user_arm64.s` — provided ARM64 assembly sample (current repo copy is an excerpt centered on `main`)
 
 Run with Docker ARM64 (important for this assembly):
 
@@ -202,19 +217,3 @@ naive-bench examples/abc_user_arm64.s \
   --runs 10 \
   --pretty
 ```
-
----
-
-## Original notes (inputs / outputs)
-
-1. Assembly code (required)
-2. Reference source (optional) — compare timing against `-O0` … `-O3`
-3. Number of timed iterations (default 30)
-4. Test cases (optional) — correctness; Codeforces-style `input` / `output`
-5. Compiler / Docker options via flags or `BenchConfig`
-
-**Outputs:** correctness (optional), timing (assembly + optional baselines), compile status; JSON from CLI or `outcome.report` in Python.
-
-- Python pip-installable package for use from other repos
-- Runs in Docker optionally to isolate Linux + toolchain
-- Naive by design — for teams that need a working benchmark quickly
