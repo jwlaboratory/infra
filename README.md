@@ -11,7 +11,7 @@ We have trying to train models to improve assembly code gen, through SFT, RL, et
 - How should we standarize the benchmarking process? I think something exists to predict the # of clock cycles a given assembly code will take to run?
 
 ## Research log
-April 4, 2026:
+April 4, 2026 - Shrey:
 We currently use benchmarking by running assembly code locally (30 times) and averaging the time it takes to run the actual compiled code.
 Few issues
 1) Not hardware agnostic
@@ -19,3 +19,14 @@ Few issues
 3) We use random n (30?)
 4) The hardware that the code is compiled on
 5) We can't easily run benchmarks from differnet repos
+
+Our scorer should check:
+1. Does the assembly code compile?
+2. Does it match the original code?
+    a) Either it passes all original test cases (heuristic)
+    b) Or it is formally verified to be identical program?
+3. Static performance metrics (number of clock cycles, memory usage, etc.)? 
+    a) Issue with this is that it doesn't seem to account for dynamic behavior (e.g. cache misses, branch predictions, etc.)
+4. Google benchmark? Isolated containers? Linux `perf` containers?
+
+We should be an open source framework people can tweak the scoring logic to their needs I think.
