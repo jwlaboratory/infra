@@ -42,3 +42,5 @@ Imagine you can pass in:
   - dynamic performance metrics
   - pass test cases / verification of code 
   - memory, static performance metrics
+
+  Let's start with naive implementation in `naive` so that we can unblock other teams requiring benchmarking.
