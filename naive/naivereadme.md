@@ -197,18 +197,18 @@ from naive_bench.parse_tests import parse_tests_file, parse_tests_payload, Tests
 
 ## Real Example Dataset (ABC)
 
-Files under `examples/`:
+Files under `../examples/`:
 
-- `examples/abc_tests.json` — provided Codeforces-style IO tests
-- `examples/abc_ref.cpp` — provided C++ reference solution
-- `examples/abc_user_arm64.s` — provided ARM64 assembly sample (current repo copy is an excerpt centered on `main`)
+- `../examples/abc_tests.json` — provided Codeforces-style IO tests
+- `../examples/abc_ref.cpp` — provided C++ reference solution
+- `../examples/abc_user_arm64.s` — provided ARM64 assembly sample (current repo copy is an excerpt centered on `main`)
 
 Run with Docker ARM64 (important for this assembly):
 
 ```bash
-naive-bench examples/abc_user_arm64.s \
-  --reference examples/abc_ref.cpp \
-  --tests examples/abc_tests.json \
+naive-bench ../examples/abc_user_arm64.s \
+  --reference ../examples/abc_ref.cpp \
+  --tests ../examples/abc_tests.json \
   --language cpp \
   --use-docker \
   --docker-image gcc:13 \

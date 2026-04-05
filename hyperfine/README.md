@@ -15,6 +15,8 @@ Copy of `infra/naive` that keeps the same compile + correctness flow, but uses
 - benchmark phase uses `hyperfine --export-json`
 - timing data is read from `timing_*.json` instead of `timing_*.txt`
 - timing entries include hyperfine metrics like `stddev_s` and per-run `samples_s`
+- warmup defaults to 3 via `--hyperfine-warmup` (override as needed)
+- optional cache/setup strategy via `--hyperfine-prepare "<cmd>"`
 
 ## Install
 
@@ -29,19 +31,20 @@ Module entry point: `python -m hyperfine_bench`
 
 ## Example
 
-Use the same sample files from `infra/naive/examples`:
+Use the shared sample files from `infra/examples`:
 
 ```bash
-hyperfine-bench ../naive/examples/abc_user_arm64.s \
-  --reference ../naive/examples/abc_ref.cpp \
-  --tests ../naive/examples/abc_tests.json \
+hyperfine-bench ../examples/abc_user_arm64.s \
+  --reference ../examples/abc_ref.cpp \
+  --tests ../examples/abc_tests.json \
   --language cpp \
   --use-docker \
   --docker-image gcc:13 \
   --docker-platform linux/arm64 \
   --extra-ldflags=-lstdc++ \
   --runs 10 \
-  --hyperfine-warmup 1 \
+  --hyperfine-warmup 3 \
+  --hyperfine-prepare "sync" \
   --timing-summary \
   --timing-chart \
   --pretty

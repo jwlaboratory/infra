@@ -177,6 +177,7 @@ def build_benchmark_phase_script(
     skip_compile: bool,
     has_reference: bool,
     hyperfine_warmup: int,
+    hyperfine_prepare: str | None,
 ) -> str:
     """
     Build O0..O3 from reference (if any), then benchmark assembly + baselines with hyperfine.
@@ -198,14 +199,19 @@ timeout "${EXEC_TIMEOUT}s" "$1" < timing.in > /dev/null 2>&1 || return 1
 """.strip()
 
     baseline_block = ""
+    prepare_arg = (
+        f" --prepare {shlex.quote(hyperfine_prepare)}"
+        if hyperfine_prepare and hyperfine_prepare.strip()
+        else ""
+    )
     if has_reference:
-        baseline_block = """
+        baseline_block = f"""
 for label in O0 O1 O2 O3; do
-  bin="./bench_${label}"
-  if [[ -x "${bin}" ]]; then
-    hyperfine --runs "${RUNS}" --warmup "${HYPERFINE_WARMUP}" \
-      --export-json "timing_${label}.json" -- \
-      "./run_one_binary.sh ${bin}" >/dev/null || exit 4
+  bin="./bench_${{label}}"
+  if [[ -x "${{bin}}" ]]; then
+    hyperfine --runs "${{RUNS}}" --warmup "${{HYPERFINE_WARMUP}}"{prepare_arg} \
+      --export-json "timing_${{label}}.json" -- \
+      "./run_one_binary.sh ${{bin}}" >/dev/null || exit 4
   fi
 done
 """.strip()
@@ -256,7 +262,7 @@ if [[ ! -x "./{C.ASM_BINARY}" ]]; then
   exit 4
 fi
 
-hyperfine --runs "${{RUNS}}" --warmup "${{HYPERFINE_WARMUP}}" \
+hyperfine --runs "${{RUNS}}" --warmup "${{HYPERFINE_WARMUP}}"{prepare_arg} \
   --export-json "{C.timing_json_for_label('asm')}" -- \
   "./run_one_binary.sh ./{C.ASM_BINARY}" >/dev/null || exit 4
 

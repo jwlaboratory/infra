@@ -49,7 +49,8 @@ class BenchConfig:
     strict_output_compare: bool = False
     timing_input_path: Path | None = None
     keep_workspace: Path | None = None
-    hyperfine_warmup: int = 0
+    hyperfine_warmup: int = 3
+    hyperfine_prepare: str | None = None
 
 
 @dataclass
@@ -230,6 +231,7 @@ def _collect_timing(root: Path, cfg: BenchConfig) -> dict[str, Any]:
         "enabled": True,
         "runs_requested": cfg.runs,
         "hyperfine_warmup": cfg.hyperfine_warmup,
+        "hyperfine_prepare": cfg.hyperfine_prepare,
         "assembly": _load_hyperfine_summary(root / C.timing_json_for_label("asm")),
     }
 
@@ -424,6 +426,7 @@ def run_benchmark(cfg: BenchConfig) -> BenchOutcome:
             skip_compile=cfg.skip_compile,
             has_reference=cfg.reference_path is not None,
             hyperfine_warmup=max(0, int(cfg.hyperfine_warmup)),
+            hyperfine_prepare=cfg.hyperfine_prepare,
         )
         proc_benchmark = _write_and_run_script(
             root, C.PHASE_BENCHMARK_SCRIPT, benchmark_script, cfg

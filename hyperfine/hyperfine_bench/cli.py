@@ -56,8 +56,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--hyperfine-warmup",
         type=int,
-        default=0,
-        help="Hyperfine warmup runs per binary (default: 0).",
+        default=3,
+        help="Hyperfine warmup runs per binary (default: 3).",
+    )
+    p.add_argument(
+        "--hyperfine-prepare",
+        default=None,
+        help="Optional hyperfine --prepare command run before each timed run.",
     )
     p.add_argument(
         "--timeout",
@@ -305,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         timing_input_path=args.timing_input,
         keep_workspace=args.workspace,
         hyperfine_warmup=max(0, int(args.hyperfine_warmup)),
+        hyperfine_prepare=args.hyperfine_prepare,
     )
 
     try:
