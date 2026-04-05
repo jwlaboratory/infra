@@ -44,3 +44,33 @@ Imagine you can pass in:
   - memory, static performance metrics
 
   Let's start with naive implementation in `naive` so that we can unblock other teams requiring benchmarking.
+
+  We've built the naive approach
+  ```bash
+  naive-bench examples/abc_user_arm64.s \
+  --reference examples/abc_ref.cpp \
+  --tests examples/abc_tests.json \
+  --language cpp \
+  --use-docker \
+  --docker-image gcc:13 \
+  --docker-platform linux/arm64 \
+  --extra-ldflags=-lstdc++ \
+  --runs 10 \
+  --timing-summary \
+  --timing-chart \
+  --pretty
+  ```
+
+  It inputs: 
+   - assembly code
+   - C code
+   - test cases
+
+   and itll run
+   - benchmark your assembly code
+   - benchmark your C code with o0, o1, o2, o3
+   - check for correctness of test cases 
+
+
+
+We basically choosing to switch to hyperfine beceuase of the cache issue

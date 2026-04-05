@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hyperfine-bench"
+version = "0.1.0"
+description = "Hyperfine-based benchmark harness for assembly + optional C/C++ baselines"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+hyperfine-bench = "hyperfine_bench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hyperfine_bench"]

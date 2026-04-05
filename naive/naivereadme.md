@@ -213,7 +213,7 @@ naive-bench examples/abc_user_arm64.s \
   --use-docker \
   --docker-image gcc:13 \
   --docker-platform linux/arm64 \
-  --extra-ldflags "-lstdc++" \
+  --extra-ldflags=-lstdc++ \
   --runs 10 \
   --timing-summary \
   --timing-chart \
