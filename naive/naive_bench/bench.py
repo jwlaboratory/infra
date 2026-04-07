@@ -49,6 +49,14 @@ class BenchConfig:
     strict_output_compare: bool = False
     timing_input_path: Path | None = None
     keep_workspace: Path | None = None
+    # ---------------------------------------------------------------------------
+    # Warmup: number of untimed iterations run before the timed loop.
+    # Eliminates cold-cache variance that inflates CV on short programs.
+    # SuperCoder (arXiv:2505.11480v3) discards first 3 runs for the same reason.
+    # Set to 0 to disable warmup (acceptable for programs > 100 ms per iteration
+    # where cache effects are negligible relative to total runtime).
+    # ---------------------------------------------------------------------------
+    warmup_runs: int = 3
 
 
 @dataclass
@@ -391,6 +399,7 @@ def run_benchmark(cfg: BenchConfig) -> BenchOutcome:
         benchmark_script = build_benchmark_phase_script(
             baseline_compile=baseline_cmds,
             runs=cfg.runs,
+            warmup_runs=cfg.warmup_runs,
             n_tests=len(cfg.tests),
             exec_timeout_s=cfg.exec_timeout_s,
             skip_compile=cfg.skip_compile,

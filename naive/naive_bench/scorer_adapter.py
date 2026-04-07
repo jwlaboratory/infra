@@ -80,10 +80,26 @@ def _median_from_baseline(baselines: Any, label: str) -> float | None:
 
 @dataclass(frozen=True)
 class ScoreCandidateConfig:
+    """Configuration for score_candidate().
+
+    Controls how the assembly candidate is compiled, tested, and benchmarked.
+    The reward formula mirrors gen-optimize-assembly/6-scorer.py so the RL
+    training loop receives a compatible signal.
+
+    Timing note: ``warmup_runs`` defaults to 3, matching the SuperCoder paper
+    (arXiv:2505.11480v3) which discards the first 3 hyperfine runs to
+    eliminate cold-cache variance before measuring real performance.
+    """
+
     language: Language = "cpp"
     runs: int = 30
     use_docker: bool = True
     docker_image: str = "gcc:13"
+    # ---------------------------------------------------------------------------
+    # docker_platform defaults to linux/arm64 here (not linux/amd64 like the
+    # CLI) because the RL pipeline targets ARM64 assembly.  Using the wrong
+    # platform triggers QEMU emulation which adds 5–20× overhead and ruins CV.
+    # ---------------------------------------------------------------------------
     docker_platform: str = "linux/arm64"
     docker_timeout_s: float = 600.0
     exec_timeout_s: float = 10.0
@@ -91,6 +107,13 @@ class ScoreCandidateConfig:
     std_c_flag: str = "-std=c17"
     std_cxx_flag: str = "-std=c++20"
     strict_output_compare: bool = False
+    # ---------------------------------------------------------------------------
+    # Warmup: untimed iterations before the timed loop.
+    # Primes instruction cache, data cache, branch predictor, and page cache
+    # for the timing input file.  Reduces coefficient of variation (CV) on
+    # short programs — the key metric for RL reward signal reliability.
+    # ---------------------------------------------------------------------------
+    warmup_runs: int = 3
 
 
 def score_candidate(
@@ -164,6 +187,7 @@ def score_candidate(
             std_c_flag=cfg.std_c_flag,
             std_cxx_flag=cfg.std_cxx_flag,
             strict_output_compare=cfg.strict_output_compare,
+            warmup_runs=cfg.warmup_runs,
         )
         outcome = run_benchmark(bench_cfg)
 

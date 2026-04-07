@@ -53,6 +53,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=30,
         help="Timed iterations per binary inside one script (default: 30).",
     )
+    # -----------------------------------------------------------------------
+    # Warmup: untimed iterations before the timed loop to prime caches.
+    # Matches the SuperCoder paper methodology (discard first 3 runs).
+    # Reduces coefficient of variation (CV) on short-running programs.
+    # Use 0 to disable (e.g., for programs > 100 ms per iteration where
+    # cold-cache overhead is negligible relative to total runtime).
+    # -----------------------------------------------------------------------
+    p.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=3,
+        help="Untimed warmup iterations before timing loop (default: 3). "
+        "Primes caches to reduce timing variance. Use 0 to disable.",
+    )
     p.add_argument(
         "--timeout",
         type=float,
@@ -297,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         strict_output_compare=bool(args.strict_output),
         timing_input_path=args.timing_input,
         keep_workspace=args.workspace,
+        warmup_runs=max(0, int(args.warmup_runs)),
     )
 
     try:

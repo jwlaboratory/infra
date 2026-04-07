@@ -172,6 +172,7 @@ def build_benchmark_phase_script(
     *,
     baseline_compile: CompileCommands,
     runs: int,
+    warmup_runs: int = 0,
     n_tests: int,
     exec_timeout_s: float,
     skip_compile: bool,
@@ -203,13 +204,28 @@ run_one_binary() {{
 }}
 """.strip()
 
+    # -----------------------------------------------------------------------
+    # Baseline timing: compile reference C/C++ at O0..O3 and time each.
+    # Each baseline gets its own warmup phase to eliminate cold-cache bias
+    # so that the assembly-vs-baseline comparison is fair.
+    # -----------------------------------------------------------------------
     baseline_timing = ""
     if has_reference:
         parts = []
         for label in opt_labels:
+            # Build a warmup block for this baseline (only when warmup_runs > 0)
+            warmup_baseline = ""
+            if warmup_runs > 0:
+                warmup_baseline = f"""
+  # Warmup: {label} baseline (not timed)
+  for j in $(seq 1 "${{WARMUP_RUNS}}"); do
+    run_one_binary "./bench_{label}" || true
+  done"""
+
             parts.append(
                 f"""
-if [[ -x "./bench_{label}" ]]; then
+if [[ -x "./bench_{label}" ]]; then{warmup_baseline}
+  # Timed runs: {label} baseline
   : > "timing_{label}.txt"
   for j in $(seq 1 "${{RUNS}}"); do
     start=$(date +%s%N)
@@ -222,7 +238,30 @@ fi
             )
         baseline_timing = "\n".join(parts)
 
+    # -----------------------------------------------------------------------
+    # Warmup: run each binary WARMUP_RUNS times *without* recording timing.
+    # This primes the instruction cache, data cache, branch predictor, and
+    # filesystem page cache for timing.in.  Failures during warmup are
+    # suppressed (|| true) — warmup is best-effort cache priming; the real
+    # timing loop catches failures via "|| exit 4".
+    #
+    # Design reference: SuperCoder (arXiv:2505.11480v3) discards the first 3
+    # hyperfine runs for the same reason.  We default to 3 warmup iterations
+    # to match their methodology.
+    # -----------------------------------------------------------------------
+    warmup_asm_block = ""
+    if warmup_runs > 0:
+        warmup_asm_block = f"""
+# --- Warmup: assembly binary (not timed) ---
+for j in $(seq 1 "${{WARMUP_RUNS}}"); do
+  run_one_binary "./{C.ASM_BINARY}" || true
+done
+""".strip()
+
     timing_block = f"""
+{warmup_asm_block}
+
+# --- Timed runs: assembly binary ---
 : > timing_asm.txt
 for j in $(seq 1 "${{RUNS}}"); do
   start=$(date +%s%N)
@@ -234,12 +273,22 @@ done
 """.strip()
 
     return f"""#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# naive-bench benchmark phase: warmup + timed runs for assembly and baselines.
+#
+# WARMUP_RUNS: untimed iterations to prime caches before measurement.
+#              Eliminates cold-start variance (instruction cache, data cache,
+#              branch predictor, page cache).  Set to 0 to skip warmup.
+# RUNS:        number of timed iterations whose wall-clock samples are
+#              recorded to timing_*.txt for statistical analysis.
+# ---------------------------------------------------------------------------
 set -u
 ROOT="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 cd "$ROOT"
 
 EXEC_TIMEOUT={exec_timeout_s}
 RUNS={runs}
+WARMUP_RUNS={warmup_runs}
 N_TESTS={n_tests}
 SKIP_COMPILE_FLAG={skip_compile_flag}
 
