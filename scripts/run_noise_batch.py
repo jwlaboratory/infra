@@ -44,6 +44,57 @@ from typing import Any
 # Both scripts live in infra/scripts/.
 # ---------------------------------------------------------------------------
 NOISE_STUDY_PY = Path(__file__).resolve().parent / "noise_study.py"
+EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
+
+
+def _upsert_flag(args: list[str], flag: str, value: str) -> list[str]:
+    """Replace ``flag value`` if present, otherwise append it."""
+    result: list[str] = []
+    i = 0
+    replaced = False
+    while i < len(args):
+        if args[i] == flag and i + 1 < len(args):
+            result.extend([flag, value])
+            replaced = True
+            i += 2
+        else:
+            result.append(args[i])
+            i += 1
+    if not replaced:
+        result.extend([flag, value])
+    return result
+
+
+def _infer_family_defaults(asm: Path, bench_args: list[str]) -> list[str]:
+    """Inject --reference and --tests if not already in bench_args.
+
+    Infers the right files based on the assembly filename prefix:
+    - abc*        → examples/abc_ref.cpp + examples/abc_tests.json
+    - example2*   → examples/example2.cpp + examples/example2_tests.json
+    """
+    # Don't override if the user already specified them explicitly.
+    if "--reference" in bench_args and "--tests" in bench_args:
+        return bench_args
+
+    stem = asm.stem
+    if stem.startswith("abc"):
+        ref = str(EXAMPLES_DIR / "abc_ref.cpp")
+        tests = str(EXAMPLES_DIR / "abc_tests.json")
+    elif stem.startswith("example2"):
+        ref = str(EXAMPLES_DIR / "example2.cpp")
+        tests = str(EXAMPLES_DIR / "example2_tests.json")
+    else:
+        # Unknown family — can't infer; leave args unchanged.
+        return bench_args
+
+    result = list(bench_args)
+    if "--reference" not in result:
+        result = _upsert_flag(result, "--reference", ref)
+    if "--tests" not in result:
+        result = _upsert_flag(result, "--tests", tests)
+    if "--language" not in result:
+        result = _upsert_flag(result, "--language", "cpp")
+    return result
 
 
 def _collect_assemblies(
@@ -82,6 +133,7 @@ def _run_one(
     Returns the parsed JSON output from noise_study.py, augmented with
     the assembly file path.  On error, returns a dict with an "error" key.
     """
+    effective_args = _infer_family_defaults(asm, bench_args)
     cmd = [
         sys.executable,
         str(NOISE_STUDY_PY),
@@ -94,7 +146,7 @@ def _run_one(
         *(["--use-hyperfine"] if use_hyperfine else []),
         "--",
         str(asm),
-        *bench_args,
+        *effective_args,
     ]
     try:
         proc = subprocess.run(
@@ -136,7 +188,23 @@ def _extract_cv(result: dict[str, Any], label: str) -> float | None:
     return entry.get("cv")
 
 
+def _split_argv(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Split sys.argv[1:] on the literal '--' separator.
+
+    Returns (script_args, forwarded_bench_args).  Everything before '--' goes
+    to argparse; everything after '--' is forwarded verbatim to naive-bench.
+    Pre-splitting prevents argparse from mis-interpreting forwarded flags
+    (e.g. --reference, --docker-image) as unknown options or positionals.
+    """
+    if "--" in argv:
+        idx = argv.index("--")
+        return argv[:idx], argv[idx + 1:]
+    return argv, []
+
+
 def main() -> int:
+    script_argv, fwd = _split_argv(sys.argv[1:])
+
     ap = argparse.ArgumentParser(
         description=(
             "Run noise_study.py on each assembly file and produce a "
@@ -178,18 +246,7 @@ def main() -> int:
         default=None,
         help="Write full per-binary JSON results here.",
     )
-    # Everything after -- is forwarded to the benchmark tool via noise_study.
-    ap.add_argument(
-        "bench_args",
-        nargs=argparse.REMAINDER,
-        help="Arguments after -- forwarded to the benchmark tool.",
-    )
-    args = ap.parse_args()
-
-    # Strip the leading "--" separator.
-    fwd = args.bench_args
-    if fwd and fwd[0] == "--":
-        fwd = fwd[1:]
+    args = ap.parse_args(script_argv)
 
     assemblies = _collect_assemblies(args.assemblies, args.asm_dir)
 

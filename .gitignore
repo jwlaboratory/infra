@@ -3,3 +3,9 @@
 
 context/
 main_context/
+
+generated_assemblies/
+
+batch_noise_results.json
+batch_noise_results_subset.json
+batch_noise_results_smoke.json
