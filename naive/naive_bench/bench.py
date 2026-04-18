@@ -49,6 +49,7 @@ class BenchConfig:
     strict_output_compare: bool = False
     timing_input_path: Path | None = None
     keep_workspace: Path | None = None
+    warmup_runs: int = 3
 
 
 @dataclass
@@ -391,6 +392,7 @@ def run_benchmark(cfg: BenchConfig) -> BenchOutcome:
         benchmark_script = build_benchmark_phase_script(
             baseline_compile=baseline_cmds,
             runs=cfg.runs,
+            warmup_runs=cfg.warmup_runs,
             n_tests=len(cfg.tests),
             exec_timeout_s=cfg.exec_timeout_s,
             skip_compile=cfg.skip_compile,

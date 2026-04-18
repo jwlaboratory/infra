@@ -172,6 +172,7 @@ def build_benchmark_phase_script(
     *,
     baseline_compile: CompileCommands,
     runs: int,
+    warmup_runs: int = 3,
     n_tests: int,
     exec_timeout_s: float,
     skip_compile: bool,
@@ -203,14 +204,30 @@ run_one_binary() {{
 }}
 """.strip()
 
+    warmup_block = ""
+    if warmup_runs > 0:
+        warmup_block = f"""
+# Warmup runs (untimed) — primes instruction/data cache and branch predictor.
+# Matches SuperCoder methodology (arXiv:2505.11480v3): discard first {warmup_runs} runs.
+for w in $(seq 1 "${{WARMUP_RUNS}}"); do
+  run_one_binary "./{C.ASM_BINARY}" || true
+done
+""".strip()
+
     baseline_timing = ""
     if has_reference:
         parts = []
         for label in opt_labels:
+            warmup_baseline = ""
+            if warmup_runs > 0:
+                warmup_baseline = f"""
+  for w in $(seq 1 "${{WARMUP_RUNS}}"); do
+    run_one_binary "./bench_{label}" || true
+  done"""
             parts.append(
                 f"""
 if [[ -x "./bench_{label}" ]]; then
-  : > "timing_{label}.txt"
+  : > "timing_{label}.txt"{warmup_baseline}
   for j in $(seq 1 "${{RUNS}}"); do
     start=$(date +%s%N)
     run_one_binary "./bench_{label}" || exit 4
@@ -224,6 +241,7 @@ fi
 
     timing_block = f"""
 : > timing_asm.txt
+{warmup_block}
 for j in $(seq 1 "${{RUNS}}"); do
   start=$(date +%s%N)
   run_one_binary "./{C.ASM_BINARY}" || exit 4
@@ -240,6 +258,7 @@ cd "$ROOT"
 
 EXEC_TIMEOUT={exec_timeout_s}
 RUNS={runs}
+WARMUP_RUNS={warmup_runs}
 N_TESTS={n_tests}
 SKIP_COMPILE_FLAG={skip_compile_flag}
 
