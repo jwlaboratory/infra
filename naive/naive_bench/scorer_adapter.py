@@ -93,6 +93,7 @@ class ScoreCandidateConfig:
 
     language: Language = "cpp"
     runs: int = 30
+    warmup_runs: int = 3
     use_docker: bool = True
     docker_image: str = "gcc:13"
     # ---------------------------------------------------------------------------
@@ -176,6 +177,7 @@ def score_candidate(
             language=cfg.language,
             tests=tests,
             runs=cfg.runs,
+            warmup_runs=cfg.warmup_runs,
             only_compile=False,
             skip_compile=False,
             use_docker=cfg.use_docker,

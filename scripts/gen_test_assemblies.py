@@ -1,352 +1,212 @@
 #!/usr/bin/env python3
 """
-Generate 20 test assembly files for the noise study.
+Generate test assemblies for the batch noise study.
 
-Uses Docker (gcc:13, linux/arm64) to cross-compile existing C++ sources at
-different optimization levels, producing assembly (.s) files via ``gcc -S``.
-Also copies the 6 existing hand-written assembly files from examples/.
-
-This gives Team 1 the 20 binaries needed to run the batch noise study and
-demonstrate < 5% CV across a diverse set of programs.
-
-Strategy for 20 files:
-  Group A: abc_ref.cpp at -O0, -O1, -O2, -O3                          → 4 files
-  Group B: example2.cpp at -O0, -O1, -O2, -O3                         → 4 files
-  Group C: abc_ref.cpp at -O2 -march=armv8-a, -O3 -march=armv8-a      → 2 files
-  Group D: example2.cpp at -O2 -march=armv8-a, -O3 -march=armv8-a     → 2 files
-  Group E: abc_ref.cpp at -Os (size optimize)                          → 1 file
-  Group F: example2.cpp at -Os                                         → 1 file
-  Group G: Existing hand-written .s files from examples/               → 6 files
-  TOTAL:                                                               = 20 files
+Compiles C++ source files at multiple optimization levels via Docker (gcc:13,
+linux/arm64) to produce .s assembly files, then copies in existing hand-written
+assemblies. Output goes to `generated_assemblies/` by default.
 
 Usage (from repo root):
-
-  python3 scripts/gen_test_assemblies.py --output-dir generated_assemblies
-
-  # Custom Docker image or platform:
   python3 scripts/gen_test_assemblies.py \\
-    --output-dir /tmp/asm_test \\
-    --docker-image gcc:13 \\
+    --out-dir generated_assemblies \\
     --docker-platform linux/arm64
 
-Prerequisites:
-  - Docker daemon running (Team 1's first priority to resolve if not)
-  - gcc:13 image available (script pulls it automatically)
+Sources compiled:
+  - examples/abc_ref.cpp      → abc_ref_{O0,O1,O2,O2_marcharmv8a,O3,O3_marcharmv8a,Os}.s  (7)
+  - examples/example2.cpp     → example2_{O0,O1,O2,O2_marcharmv8a,O3,O3_marcharmv8a,Os}.s (7)
+
+Hand-written assemblies copied:
+  - examples/abc_user_arm64.s          → abc_user_arm64.s
+  - examples/example2_deepseek.s       → example2_deepseek.s
+  - examples/example2_deepseek_speed.s → example2_deepseek_speed.s
+  - examples/example2_gemma.s          → example2_gemma.s
+  - examples/example2_gemma_speed.s    → example2_gemma_speed.s
+  - examples/example2_sonnet4.6.s      → example2_sonnet4.6.s
+
+Total: 20 assembly files.
 """
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import NamedTuple
 
 
-# ---------------------------------------------------------------------------
-# Configuration: which C++ sources to compile and at what optimization levels.
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class CompileSpec:
-    """One assembly file to generate from a C++ source."""
-    source: Path          # Path to C++ source (relative to repo root)
-    opt_flag: str         # e.g. "-O2"
-    extra_cflags: tuple[str, ...] = ()  # e.g. ("-march=armv8-a",)
-    output_name: str = ""  # If empty, auto-generated from source + flags
-
-    def derive_output_name(self) -> str:
-        """Generate a descriptive .s filename from the source and flags."""
-        if self.output_name:
-            return self.output_name
-        stem = self.source.stem  # e.g. "abc_ref"
-        # Turn "-O2" into "O2", "-Os" into "Os"
-        opt_suffix = self.opt_flag.lstrip("-")
-        # Turn extra flags like "-march=armv8-a" into "armv8a"
-        extra = ""
-        for flag in self.extra_cflags:
-            # Strip leading dash, replace non-alphanum with nothing
-            clean = flag.lstrip("-").replace("=", "").replace("-", "")
-            extra += f"_{clean}"
-        return f"{stem}_{opt_suffix}{extra}.s"
+REPO_ROOT = Path(__file__).parent.parent
 
 
-def _build_compile_specs(examples_dir: Path) -> list[CompileSpec]:
-    """Build the list of 14 compile specs (Groups A–F from the strategy)."""
-    abc = examples_dir / "abc_ref.cpp"
-    ex2 = examples_dir / "example2.cpp"
-
-    specs: list[CompileSpec] = []
-
-    # Group A: abc_ref.cpp at O0, O1, O2, O3
-    for opt in ["-O0", "-O1", "-O2", "-O3"]:
-        specs.append(CompileSpec(source=abc, opt_flag=opt))
-
-    # Group B: example2.cpp at O0, O1, O2, O3
-    for opt in ["-O0", "-O1", "-O2", "-O3"]:
-        specs.append(CompileSpec(source=ex2, opt_flag=opt))
-
-    # Group C: abc_ref.cpp with -march=armv8-a at O2, O3
-    for opt in ["-O2", "-O3"]:
-        specs.append(
-            CompileSpec(source=abc, opt_flag=opt, extra_cflags=("-march=armv8-a",))
-        )
-
-    # Group D: example2.cpp with -march=armv8-a at O2, O3
-    for opt in ["-O2", "-O3"]:
-        specs.append(
-            CompileSpec(source=ex2, opt_flag=opt, extra_cflags=("-march=armv8-a",))
-        )
-
-    # Group E: abc_ref.cpp at -Os (size optimization)
-    specs.append(CompileSpec(source=abc, opt_flag="-Os"))
-
-    # Group F: example2.cpp at -Os
-    specs.append(CompileSpec(source=ex2, opt_flag="-Os"))
-
-    return specs
+class CompileVariant(NamedTuple):
+    source: Path
+    opt_flag: str
+    extra_flags: list[str]
+    out_stem: str  # stem for the output .s file
 
 
-def _find_existing_asm(examples_dir: Path) -> list[Path]:
-    """Find existing hand-written .s files in examples/ (Group G)."""
-    return sorted(examples_dir.glob("*.s"))
-
-
-# ---------------------------------------------------------------------------
-# Docker-based cross-compilation: gcc -S inside the container.
-# ---------------------------------------------------------------------------
-
-def _docker_pull(image: str) -> bool:
-    """Pull the Docker image (idempotent).  Returns True on success."""
-    print(f"  Pulling Docker image: {image}...", end="", flush=True)
-    result = subprocess.run(
-        ["docker", "pull", image],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        print(" done")
-        return True
-    else:
-        print(f" FAILED\n  {result.stderr[:300]}")
-        return False
-
-
-def compile_to_asm(
+def _compile_to_asm_via_docker(
     source: Path,
-    output: Path,
-    *,
     opt_flag: str,
-    extra_cflags: tuple[str, ...] = (),
-    std_flag: str = "-std=c++20",
+    extra_flags: list[str],
+    out_path: Path,
     docker_image: str,
     docker_platform: str,
-    docker_timeout_s: float = 120.0,
+    timeout_s: float = 120.0,
 ) -> bool:
-    """Compile a C++ source to assembly inside Docker using gcc -S.
-
-    Mounts the source's parent directory at /src (read-only) and the output
-    directory at /out (writable).  Runs:
-      g++ -S -fverbose-asm {opt_flag} {extra_cflags} {std_flag} /src/{name} -o /out/{name}
-
-    Returns True on success, False on failure.
     """
-    src_dir = source.resolve().parent
-    out_dir = output.resolve().parent
-    out_dir.mkdir(parents=True, exist_ok=True)
+    Compile `source` to assembly using Docker, write to `out_path`.
+    Returns True on success.
+    """
+    with tempfile.TemporaryDirectory(prefix="gen-asm-") as tmp_str:
+        tmp = Path(tmp_str)
+        src_in = tmp / source.name
+        shutil.copy(source, src_in)
 
-    # Build the gcc command that will run inside the container.
-    gcc_cmd = [
-        "g++",
-        "-S",                  # Produce assembly instead of object code.
-        "-fverbose-asm",       # Add comments showing C++ source lines.
-        opt_flag,              # Optimization level (e.g. -O2, -Os).
-        *extra_cflags,         # Extra flags (e.g. -march=armv8-a).
-        std_flag,              # Language standard (e.g. -std=c++20).
-        f"/src/{source.name}",
-        "-o",
-        f"/out/{output.name}",
-    ]
+        out_name = "output.s"
+        cmd_parts = [
+            "g++",
+            "-std=c++20",
+            opt_flag,
+            *extra_flags,
+            "-S",           # compile to assembly only
+            "-o", out_name,
+            source.name,
+        ]
+        script_body = "#!/usr/bin/env bash\nset -e\ncd /work\n" + " ".join(cmd_parts) + "\n"
+        script_path = tmp / "compile.sh"
+        script_path.write_text(script_body, encoding="utf-8")
+        script_path.chmod(0o755)
 
-    docker_cmd = [
-        "docker", "run", "--rm",
-        "--platform", docker_platform,
-        "-v", f"{src_dir}:/src:ro",
-        "-v", f"{out_dir}:/out",
-        "-w", "/src",
-        docker_image,
-        *gcc_cmd,
-    ]
-
-    try:
-        result = subprocess.run(
-            docker_cmd,
+        proc = subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "--platform", docker_platform,
+                "-v", f"{tmp.resolve()}:/work",
+                "-w", "/work",
+                docker_image,
+                "bash", "/work/compile.sh",
+            ],
             capture_output=True,
             text=True,
-            timeout=docker_timeout_s,
+            timeout=timeout_s,
         )
-    except subprocess.TimeoutExpired:
-        print(f"    TIMEOUT compiling {source.name} with {opt_flag}")
-        return False
 
-    if result.returncode != 0:
-        print(f"    FAILED compiling {source.name} with {opt_flag}")
-        if result.stderr:
-            # Show first few lines of error for debugging.
-            for line in result.stderr.strip().splitlines()[:5]:
-                print(f"      {line}")
-        return False
+        if proc.returncode != 0:
+            print(f"    FAILED (exit {proc.returncode}): {proc.stderr[:500]}", file=sys.stderr)
+            return False
 
-    return output.is_file()
+        generated = tmp / out_name
+        if not generated.is_file():
+            print(f"    FAILED: output file not found", file=sys.stderr)
+            return False
 
+        shutil.copy(generated, out_path)
+        return True
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> int:
-    import argparse
-
-    ap = argparse.ArgumentParser(
-        description=(
-            "Generate 20 test assembly files for the batch noise study.  "
-            "Compiles C++ sources at multiple optimization levels using Docker "
-            "and copies existing hand-written assembly files."
-        ),
-    )
+    ap = argparse.ArgumentParser(description="Generate test assemblies for noise study.")
     ap.add_argument(
-        "--output-dir",
+        "--out-dir",
         type=Path,
-        default=Path("generated_assemblies"),
-        help="Directory to write generated .s files (default: generated_assemblies/).",
-    )
-    ap.add_argument(
-        "--examples-dir",
-        type=Path,
-        default=Path("examples"),
-        help="Directory containing C++ sources and existing .s files (default: examples/).",
+        default=REPO_ROOT / "generated_assemblies",
+        help="Output directory for .s files (default: generated_assemblies/).",
     )
     ap.add_argument(
         "--docker-image",
         default="gcc:13",
-        help="Docker image with gcc/g++ (default: gcc:13).",
+        help="Docker image (default: gcc:13).",
     )
     ap.add_argument(
         "--docker-platform",
         default="linux/arm64",
-        help="Docker --platform for cross-compilation (default: linux/arm64).",
+        help="Docker --platform (default: linux/arm64).",
     )
     ap.add_argument(
-        "--docker-timeout",
-        type=float,
-        default=120.0,
-        help="Timeout per compilation in seconds (default: 120).",
+        "--skip-docker",
+        action="store_true",
+        help="Skip Docker compilation; only copy hand-written assemblies.",
     )
     args = ap.parse_args()
 
-    examples_dir = args.examples_dir.resolve()
-    output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    out_dir: Path = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Verify source files exist.
-    for name in ["abc_ref.cpp", "example2.cpp"]:
-        if not (examples_dir / name).is_file():
-            print(f"error: {examples_dir / name} not found", file=sys.stderr)
-            return 2
+    sources = [
+        (REPO_ROOT / "examples" / "abc_ref.cpp", "abc_ref"),
+        (REPO_ROOT / "examples" / "example2.cpp", "example2"),
+    ]
 
-    # -----------------------------------------------------------------------
-    # Check Docker availability — this is the #1 blocker for Team 1.
-    # -----------------------------------------------------------------------
-    docker_check = subprocess.run(
-        ["docker", "info"], capture_output=True, text=True
-    )
-    if docker_check.returncode != 0:
-        print(
-            "error: Docker daemon is not reachable.\n"
-            "  Team 1 action: ensure Docker Desktop is running, or use colima/podman.\n"
-            f"  docker info stderr: {docker_check.stderr[:200]}",
-            file=sys.stderr,
-        )
-        return 2
+    opt_variants: list[tuple[str, str, list[str]]] = [
+        ("O0", "-O0", []),
+        ("O1", "-O1", []),
+        ("O2", "-O2", []),
+        ("O2_marcharmv8a", "-O2", ["-march=armv8-a"]),
+        ("O3", "-O3", []),
+        ("O3_marcharmv8a", "-O3", ["-march=armv8-a"]),
+        ("Os", "-Os", []),
+    ]
 
-    # Pull the Docker image once before the batch.
-    if not _docker_pull(args.docker_image):
-        print("error: failed to pull Docker image", file=sys.stderr)
-        return 2
+    compiled_ok = 0
+    compiled_fail = 0
 
-    # -----------------------------------------------------------------------
-    # Phase 1: Compile C++ sources at multiple optimization levels (Groups A–F).
-    # -----------------------------------------------------------------------
-    specs = _build_compile_specs(examples_dir)
-    print(f"\n  Compiling {len(specs)} assembly variants...\n")
+    if not args.skip_docker:
+        print(f"Compiling assemblies via Docker ({args.docker_platform}, {args.docker_image})...", file=sys.stderr)
+        for src_path, prefix in sources:
+            if not src_path.is_file():
+                print(f"  WARNING: source not found: {src_path}", file=sys.stderr)
+                continue
+            for opt_name, opt_flag, extra_flags in opt_variants:
+                out_stem = f"{prefix}_{opt_name}"
+                out_path = out_dir / f"{out_stem}.s"
+                print(f"  {out_stem}.s ...", end=" ", flush=True, file=sys.stderr)
+                ok = _compile_to_asm_via_docker(
+                    src_path, opt_flag, extra_flags, out_path,
+                    docker_image=args.docker_image,
+                    docker_platform=args.docker_platform,
+                )
+                if ok:
+                    compiled_ok += 1
+                    print("OK", file=sys.stderr)
+                else:
+                    compiled_fail += 1
+    else:
+        print("Skipping Docker compilation (--skip-docker).", file=sys.stderr)
 
-    compiled_count = 0
-    failed_count = 0
+    # Copy hand-written assemblies
+    hand_written = [
+        "abc_user_arm64.s",
+        "example2_deepseek.s",
+        "example2_deepseek_speed.s",
+        "example2_gemma.s",
+        "example2_gemma_speed.s",
+        "example2_sonnet4.6.s",
+    ]
 
-    for spec in specs:
-        out_name = spec.derive_output_name()
-        out_path = output_dir / out_name
-        print(f"  [{compiled_count + failed_count + 1}/{len(specs)}] "
-              f"{spec.source.name} {spec.opt_flag} "
-              f"{' '.join(spec.extra_cflags)} → {out_name}",
-              end="  ", flush=True)
-
-        ok = compile_to_asm(
-            spec.source,
-            out_path,
-            opt_flag=spec.opt_flag,
-            extra_cflags=spec.extra_cflags,
-            docker_image=args.docker_image,
-            docker_platform=args.docker_platform,
-            docker_timeout_s=args.docker_timeout,
-        )
-        if ok:
-            print("OK")
-            compiled_count += 1
+    copied_ok = 0
+    copied_missing = 0
+    print("\nCopying hand-written assemblies...", file=sys.stderr)
+    examples_dir = REPO_ROOT / "examples"
+    for name in hand_written:
+        src = examples_dir / name
+        dst = out_dir / name
+        if src.is_file():
+            shutil.copy(src, dst)
+            copied_ok += 1
+            print(f"  {name} ... OK", file=sys.stderr)
         else:
-            failed_count += 1
+            copied_missing += 1
+            print(f"  {name} ... MISSING ({src})", file=sys.stderr)
 
-    # -----------------------------------------------------------------------
-    # Phase 2: Copy existing hand-written .s files (Group G).
-    # -----------------------------------------------------------------------
-    existing = _find_existing_asm(examples_dir)
-    print(f"\n  Copying {len(existing)} existing assembly files...\n")
+    total = compiled_ok + copied_ok
+    print(f"\nDone. {total} assemblies in {out_dir}/", file=sys.stderr)
+    print(f"  Compiled: {compiled_ok} OK, {compiled_fail} failed", file=sys.stderr)
+    print(f"  Copied:   {copied_ok} OK, {copied_missing} missing\n", file=sys.stderr)
 
-    copied_count = 0
-    for asm in existing:
-        dest = output_dir / asm.name
-        shutil.copy2(asm, dest)
-        print(f"  {asm.name} → {dest.name}")
-        copied_count += 1
-
-    # -----------------------------------------------------------------------
-    # Summary
-    # -----------------------------------------------------------------------
-    total = compiled_count + copied_count
-    all_files = sorted(output_dir.glob("*.s"))
-
-    print(f"\n{'='*60}")
-    print(f"  GENERATION COMPLETE")
-    print(f"  Compiled:  {compiled_count} (failed: {failed_count})")
-    print(f"  Copied:    {copied_count}")
-    print(f"  Total:     {total} assembly files in {output_dir}/")
-    print(f"{'='*60}\n")
-
-    if total < 20:
-        print(
-            f"  WARNING: Only {total} files generated (target: 20).\n"
-            f"  Check compilation failures above.",
-            file=sys.stderr,
-        )
-
-    # List all generated files.
-    print("  Generated files:")
-    for f in all_files:
-        size = f.stat().st_size
-        print(f"    {f.name:<40} {size:>8} bytes")
-
-    return 0 if failed_count == 0 else 1
+    return 0 if compiled_fail == 0 and copied_missing == 0 else 1
 
 
 if __name__ == "__main__":

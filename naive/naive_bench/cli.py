@@ -68,6 +68,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "Primes caches to reduce timing variance. Use 0 to disable.",
     )
     p.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=3,
+        help="Untimed warmup iterations before the timed loop (default: 3). "
+        "Primes instruction/data cache. Set 0 to disable. "
+        "Matches SuperCoder methodology (arXiv:2505.11480v3).",
+    )
+    p.add_argument(
         "--timeout",
         type=float,
         default=10.0,
@@ -296,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         language=args.language,
         tests=tests,
         runs=max(1, int(args.runs)),
+        warmup_runs=max(0, int(args.warmup_runs)),
         only_compile=bool(args.only_compile),
         skip_compile=bool(args.skip_compile),
         use_docker=bool(args.use_docker),

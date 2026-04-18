@@ -1,44 +1,20 @@
 #!/usr/bin/env python3
 """
-Measure Docker container overhead vs host-native execution.
+Measure Docker overhead vs local execution on a simple assembly binary.
 
-Runs naive-bench on the same assembly file both locally (no Docker) and inside
-Docker, then compares the timing to quantify the container overhead ratio.
+Compiles a minimal "hello world" assembly and times it locally and inside Docker
+at different platforms, printing overhead ratios. Helps identify QEMU emulation
+problems (5–20× overhead vs native 1.05–1.15×).
 
-This answers Team 1's deliverable: "Benchmark Docker overhead (host vs.
-container timing delta)."
+Usage (from repo root, after `pip install -e naive/`):
 
-The overhead ratio tells us whether Docker isolation is worth the cost:
-  - 1.0–1.15×: negligible overhead — Docker is the right default for
-    reproducibility (standardized Linux ARM64 toolchain across all devs).
-  - 1.15–2.0×: moderate overhead — acceptable for most programs, but
-    short-running programs (< 1 ms) may see inflated CV.
-  - > 2.0×: significant overhead — likely indicates QEMU emulation
-    (wrong --docker-platform) or Docker Desktop performance issues.
+  python3 scripts/docker_overhead_study.py \\
+    --reference examples/abc_ref.cpp \\
+    --tests examples/abc_tests.json \\
+    --assembly examples/abc_user_arm64.s \\
+    --repeats 5 --runs 10
 
-IMPORTANT: The local mode uses ``date +%s%N`` which only works on Linux.
-On macOS, ``date +%s%N`` gives seconds-only resolution (BSD date), making
-local timing useless.  This script is designed for Linux hosts or for
-comparing two Docker modes (e.g., native ARM64 vs QEMU-emulated AMD64).
-
-Usage (from repo root):
-
-  # Compare local vs Docker on a Linux host:
-  python3 scripts/docker_overhead_study.py examples/abc_user_arm64.s \\
-    --repeats 5 \\
-    -- --reference examples/abc_ref.cpp \\
-       --tests examples/abc_tests.json \\
-       --language cpp --docker-image gcc:13 \\
-       --docker-platform linux/arm64 --extra-ldflags=-lstdc++ --runs 30
-
-  # Compare two Docker platforms (e.g., native ARM64 vs QEMU AMD64):
-  python3 scripts/docker_overhead_study.py examples/abc_user_arm64.s \\
-    --mode platform-compare \\
-    --platform-a linux/arm64 --platform-b linux/amd64 \\
-    --repeats 5 \\
-    -- --reference examples/abc_ref.cpp \\
-       --tests examples/abc_tests.json \\
-       --language cpp --docker-image gcc:13 --extra-ldflags=-lstdc++ --runs 30
+Requires Docker to be running.
 """
 
 from __future__ import annotations
@@ -47,264 +23,192 @@ import argparse
 import json
 import subprocess
 import sys
-from statistics import mean, median, pstdev
+from pathlib import Path
+from statistics import mean, median
 from typing import Any
 
 
-def _cv(values: list[float]) -> float | None:
-    """Coefficient of variation = stdev / mean.  None if < 2 values."""
-    if len(values) < 2:
-        return None
-    m = mean(values)
-    if m == 0:
-        return None
-    return pstdev(values) / m
+REPO_ROOT = Path(__file__).parent.parent
 
 
-def _run_bench(
-    bench_args: list[str],
-    *,
+def _run_naive_bench(
+    asm: Path,
+    reference: Path | None,
+    tests: Path | None,
+    runs: int,
+    warmup_runs: int,
+    use_docker: bool,
+    docker_platform: str,
+    docker_image: str,
+    language: str,
+    extra_ldflags: str,
+) -> dict[str, Any] | None:
+    cmd = [
+        "naive-bench", str(asm),
+        "--runs", str(runs),
+        "--warmup-runs", str(warmup_runs),
+        "--language", language,
+    ]
+    if reference:
+        cmd += ["--reference", str(reference)]
+    if tests:
+        cmd += ["--tests", str(tests)]
+    if extra_ldflags:
+        cmd += [f"--extra-ldflags={extra_ldflags}"]
+    if use_docker:
+        cmd += [
+            "--use-docker",
+            "--docker-image", docker_image,
+            "--docker-platform", docker_platform,
+        ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return json.loads(proc.stdout.strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _extract_median_ms(report: dict[str, Any]) -> float | None:
+    timing = report.get("timing") or {}
+    if not timing.get("enabled"):
+        return None
+    asm = timing.get("assembly") or {}
+    med_s = asm.get("median_s")
+    if med_s is None:
+        return None
+    return float(med_s) * 1000.0
+
+
+def _collect_medians(
+    asm: Path,
+    reference: Path | None,
+    tests: Path | None,
     repeats: int,
+    runs: int,
+    warmup_runs: int,
+    use_docker: bool,
+    docker_platform: str,
+    docker_image: str,
+    language: str,
+    extra_ldflags: str,
     label: str,
 ) -> list[float]:
-    """Run naive-bench ``repeats`` times and collect assembly median_s values.
-
-    Returns a list of median_s floats (one per invocation).
-    """
     medians: list[float] = []
     for i in range(repeats):
-        print(
-            f"  [{i + 1}/{repeats}] {label}...",
-            file=sys.stderr,
-            end="",
-            flush=True,
+        print(f"    run {i+1}/{repeats}...", end=" ", flush=True, file=sys.stderr)
+        report = _run_naive_bench(
+            asm, reference, tests, runs, warmup_runs,
+            use_docker, docker_platform, docker_image, language, extra_ldflags,
         )
-        try:
-            proc = subprocess.run(
-                ["naive-bench", *bench_args],
-                capture_output=True,
-                text=True,
-                timeout=1200,
-            )
-        except subprocess.TimeoutExpired:
-            print(" TIMEOUT", file=sys.stderr)
+        if report is None:
+            print("FAILED (no JSON)", file=sys.stderr)
             continue
-        except FileNotFoundError:
-            print("\nerror: naive-bench not found. Install with: pip install -e naive/", file=sys.stderr)
-            sys.exit(2)
-
-        if proc.returncode != 0 and not proc.stdout.strip():
-            print(f" FAILED (exit {proc.returncode})", file=sys.stderr)
+        if not report.get("ok"):
+            print(f"FAILED (ok=False)", file=sys.stderr)
             continue
-
-        try:
-            report = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            print(" invalid JSON", file=sys.stderr)
+        med = _extract_median_ms(report)
+        if med is None:
+            print("FAILED (no timing)", file=sys.stderr)
             continue
-
-        timing = report.get("timing", {})
-        asm = timing.get("assembly", {})
-        med = asm.get("median_s")
-        if med is not None:
-            medians.append(float(med))
-            print(f" {float(med)*1000:.3f} ms", file=sys.stderr)
-        else:
-            print(" no timing", file=sys.stderr)
-
+        medians.append(med)
+        print(f"{med:.3f} ms", file=sys.stderr)
     return medians
 
 
-def _print_comparison(
-    label_a: str,
-    medians_a: list[float],
-    label_b: str,
-    medians_b: list[float],
-    threshold: float,
-) -> bool:
-    """Print a comparison table and return True if both CVs pass."""
-    print(f"\n{'='*60}", file=sys.stderr)
-    print(f"  DOCKER OVERHEAD STUDY", file=sys.stderr)
-    print(f"{'='*60}\n", file=sys.stderr)
-
-    all_pass = True
-
-    for label, medians in [(label_a, medians_a), (label_b, medians_b)]:
-        if not medians:
-            print(f"  {label:<20} NO DATA", file=sys.stderr)
-            all_pass = False
-            continue
-        med = median(medians)
-        avg = mean(medians)
-        cv = _cv(medians)
-        cv_str = f"{cv:.4f}" if cv is not None else "N/A"
-        cv_pass = cv is not None and cv < threshold
-        verdict = "PASS" if cv_pass else "FAIL"
-        if not cv_pass:
-            all_pass = False
-        print(
-            f"  {label:<20} median={med*1000:8.3f} ms  "
-            f"mean={avg*1000:8.3f} ms  CV={cv_str}  {verdict}",
-            file=sys.stderr,
-        )
-
-    # Overhead ratio.
-    if medians_a and medians_b:
-        ratio = median(medians_b) / median(medians_a) if median(medians_a) > 0 else float("inf")
-        print(file=sys.stderr)
-        print(f"  Overhead ratio ({label_b} / {label_a}): {ratio:.3f}x", file=sys.stderr)
-        if ratio < 1.15:
-            print(f"  → Negligible overhead — Docker isolation recommended.", file=sys.stderr)
-        elif ratio < 2.0:
-            print(f"  → Moderate overhead — acceptable for most programs.", file=sys.stderr)
-        else:
-            print(
-                f"  → Significant overhead — check --docker-platform for QEMU emulation.",
-                file=sys.stderr,
-            )
-
-    print(f"\n{'='*60}\n", file=sys.stderr)
-
-    # Also emit JSON to stdout for machine consumption.
-    output: dict[str, Any] = {}
-    for label, medians in [(label_a, medians_a), (label_b, medians_b)]:
-        output[label] = {
-            "medians_s": medians,
-            "median_s": median(medians) if medians else None,
-            "mean_s": mean(medians) if medians else None,
-            "cv": _cv(medians),
-            "n": len(medians),
-        }
-    if medians_a and medians_b:
-        output["overhead_ratio"] = median(medians_b) / median(medians_a) if median(medians_a) > 0 else None
-    print(json.dumps(output, indent=2))
-
-    return all_pass
+def _summarize(vals: list[float]) -> dict[str, Any]:
+    if not vals:
+        return {"n": 0}
+    return {
+        "n": len(vals),
+        "mean_ms": mean(vals),
+        "median_ms": median(vals),
+        "min_ms": min(vals),
+        "max_ms": max(vals),
+    }
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description=(
-            "Measure Docker overhead by comparing local vs Docker execution, "
-            "or two different Docker platforms."
-        ),
-    )
-    ap.add_argument(
-        "assembly",
-        type=str,
-        help="Path to assembly file.",
-    )
-    ap.add_argument(
-        "--repeats",
-        type=int,
-        default=5,
-        help="Number of naive-bench invocations per mode (default: 5).",
-    )
-    ap.add_argument(
-        "--threshold",
-        type=float,
-        default=0.05,
-        help="CV threshold for PASS/FAIL (default: 0.05 = 5%%).",
-    )
-    # -----------------------------------------------------------------------
-    # Mode selection:
-    #   "host-vs-docker" (default): run locally vs Docker.
-    #   "platform-compare": run Docker with two different --docker-platform
-    #     values to measure the impact of QEMU emulation.
-    # -----------------------------------------------------------------------
-    ap.add_argument(
-        "--mode",
-        choices=("host-vs-docker", "platform-compare"),
-        default="host-vs-docker",
-        help="Comparison mode (default: host-vs-docker).",
-    )
-    ap.add_argument(
-        "--platform-a",
-        default="linux/arm64",
-        help="First Docker platform for platform-compare mode (default: linux/arm64).",
-    )
-    ap.add_argument(
-        "--platform-b",
-        default="linux/amd64",
-        help="Second Docker platform for platform-compare mode (default: linux/amd64).",
-    )
-    ap.add_argument(
-        "bench_args",
-        nargs=argparse.REMAINDER,
-        help="Arguments after -- forwarded to naive-bench.",
-    )
+    ap = argparse.ArgumentParser(description="Measure Docker overhead vs local execution.")
+    ap.add_argument("--assembly", type=Path, default=REPO_ROOT / "examples" / "abc_user_arm64.s")
+    ap.add_argument("--reference", type=Path, default=REPO_ROOT / "examples" / "abc_ref.cpp")
+    ap.add_argument("--tests", type=Path, default=REPO_ROOT / "examples" / "abc_tests.json")
+    ap.add_argument("--language", default="cpp", choices=("c", "cpp"))
+    ap.add_argument("--extra-ldflags", default="-lstdc++")
+    ap.add_argument("--repeats", type=int, default=5, help="Outer repeats per mode (default: 5).")
+    ap.add_argument("--runs", type=int, default=10, help="Timed iterations per naive-bench call (default: 10).")
+    ap.add_argument("--warmup-runs", type=int, default=3, help="Warmup iterations (default: 3).")
+    ap.add_argument("--docker-image", default="gcc:13")
+    ap.add_argument("--arm64-platform", default="linux/arm64")
+    ap.add_argument("--amd64-platform", default="linux/amd64")
+    ap.add_argument("--skip-local", action="store_true", help="Skip local (non-Docker) timing.")
+    ap.add_argument("--skip-amd64", action="store_true", help="Skip linux/amd64 Docker timing (QEMU).")
+    ap.add_argument("--json-out", type=str, default="")
     args = ap.parse_args()
 
-    fwd = args.bench_args
-    if fwd and fwd[0] == "--":
-        fwd = fwd[1:]
-
-    # We always prepend the assembly file to the forwarded args.
-    base_args = [args.assembly, *fwd]
-
-    if args.mode == "host-vs-docker":
-        # -----------------------------------------------------------------
-        # Mode 1: Host (local, no Docker) vs Docker.
-        #
-        # Local args: remove --use-docker if present, ensure it's absent.
-        # Docker args: add --use-docker if not present.
-        # -----------------------------------------------------------------
-        local_args = [a for a in base_args if a != "--use-docker"]
-        docker_args = base_args if "--use-docker" in base_args else ["--use-docker", *base_args]
-
-        print("\n  Phase 1: Local (no Docker) execution\n", file=sys.stderr)
-        local_medians = _run_bench(local_args, repeats=args.repeats, label="local")
-
-        print("\n  Phase 2: Docker execution\n", file=sys.stderr)
-        docker_medians = _run_bench(docker_args, repeats=args.repeats, label="docker")
-
-        ok = _print_comparison("local", local_medians, "docker", docker_medians, args.threshold)
-
-    elif args.mode == "platform-compare":
-        # -----------------------------------------------------------------
-        # Mode 2: Compare two Docker platforms.
-        # Useful for measuring QEMU emulation overhead:
-        #   linux/arm64 (native on Apple Silicon) vs linux/amd64 (QEMU).
-        # -----------------------------------------------------------------
-        # Ensure --use-docker is in the args.
-        if "--use-docker" not in base_args:
-            base_args = ["--use-docker", *base_args]
-
-        # Replace or add --docker-platform for each run.
-        def _set_platform(args_list: list[str], platform: str) -> list[str]:
-            result = []
-            skip_next = False
-            for a in args_list:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if a == "--docker-platform":
-                    skip_next = True
-                    continue
-                result.append(a)
-            result.extend(["--docker-platform", platform])
-            return result
-
-        args_a = _set_platform(base_args, args.platform_a)
-        args_b = _set_platform(base_args, args.platform_b)
-
-        print(f"\n  Phase 1: Docker with {args.platform_a}\n", file=sys.stderr)
-        medians_a = _run_bench(args_a, repeats=args.repeats, label=args.platform_a)
-
-        print(f"\n  Phase 2: Docker with {args.platform_b}\n", file=sys.stderr)
-        medians_b = _run_bench(args_b, repeats=args.repeats, label=args.platform_b)
-
-        ok = _print_comparison(
-            args.platform_a, medians_a,
-            args.platform_b, medians_b,
-            args.threshold,
-        )
-
-    else:
-        print(f"error: unknown mode {args.mode}", file=sys.stderr)
+    asm = args.assembly
+    if not asm.is_file():
+        print(f"error: assembly not found: {asm}", file=sys.stderr)
         return 2
 
-    return 0 if ok else 1
+    modes: list[tuple[str, bool, str]] = []
+    if not args.skip_local:
+        modes.append(("local (no Docker)", False, ""))
+    modes.append(("Docker linux/arm64 (native)", True, args.arm64_platform))
+    if not args.skip_amd64:
+        modes.append(("Docker linux/amd64 (QEMU on ARM host)", True, args.amd64_platform))
+
+    results: dict[str, Any] = {}
+    baseline_median: float | None = None
+
+    for label, use_docker, platform in modes:
+        print(f"\n[{label}]", file=sys.stderr)
+        medians = _collect_medians(
+            asm, args.reference, args.tests,
+            args.repeats, args.runs, args.warmup_runs,
+            use_docker, platform, args.docker_image, args.language, args.extra_ldflags,
+            label,
+        )
+        summary = _summarize(medians)
+        if baseline_median is None and summary.get("n", 0) > 0:
+            baseline_median = summary["median_ms"]
+        overhead: float | None = None
+        if baseline_median and summary.get("n", 0) > 0:
+            overhead = summary["median_ms"] / baseline_median
+        summary["overhead_vs_baseline"] = overhead
+        results[label] = summary
+
+    # Print summary table
+    print(f"\n{'='*72}", file=sys.stderr)
+    print("  DOCKER OVERHEAD STUDY RESULTS", file=sys.stderr)
+    print(f"{'='*72}", file=sys.stderr)
+    print(f"  {'Mode':<38} {'Median ms':>10} {'Overhead':>10}  {'N':>3}", file=sys.stderr)
+    print(f"  {'-'*38} {'-'*10} {'-'*10}  {'-'*3}", file=sys.stderr)
+    for label, summary in results.items():
+        if summary.get("n", 0) == 0:
+            print(f"  {label:<38} {'N/A':>10} {'N/A':>10}  {0:>3}", file=sys.stderr)
+        else:
+            ov = summary.get("overhead_vs_baseline")
+            ov_str = f"{ov:.2f}×" if ov is not None else "N/A"
+            print(
+                f"  {label:<38} {summary['median_ms']:>10.3f} {ov_str:>10}  {summary['n']:>3}",
+                file=sys.stderr,
+            )
+    print(f"{'='*72}", file=sys.stderr)
+    print(f"\nNote: overhead > 5× suggests QEMU emulation (platform mismatch).", file=sys.stderr)
+    print(f"      overhead 1.05–1.15× is acceptable for Docker native runs.\n", file=sys.stderr)
+
+    output = {
+        "assembly": str(asm),
+        "repeats": args.repeats,
+        "runs": args.runs,
+        "warmup_runs": args.warmup_runs,
+        "modes": results,
+    }
+    print(json.dumps(output, indent=2))
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(output, indent=2), encoding="utf-8")
+
+    return 0
 
 
 if __name__ == "__main__":

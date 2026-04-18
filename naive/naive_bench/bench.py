@@ -49,13 +49,6 @@ class BenchConfig:
     strict_output_compare: bool = False
     timing_input_path: Path | None = None
     keep_workspace: Path | None = None
-    # ---------------------------------------------------------------------------
-    # Warmup: number of untimed iterations run before the timed loop.
-    # Eliminates cold-cache variance that inflates CV on short programs.
-    # SuperCoder (arXiv:2505.11480v3) discards first 3 runs for the same reason.
-    # Set to 0 to disable warmup (acceptable for programs > 100 ms per iteration
-    # where cache effects are negligible relative to total runtime).
-    # ---------------------------------------------------------------------------
     warmup_runs: int = 3
 
 
