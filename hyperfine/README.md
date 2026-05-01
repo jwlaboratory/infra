@@ -50,6 +50,22 @@ hyperfine-bench ../examples/abc_user_arm64.s \
   --pretty
 ```
 
+or
+```
+hyperfine-bench ../examples/example2.s \
+  --reference ../examples/example2.cpp \
+  --language cpp \
+  --use-docker \
+  --docker-image gcc:13 \
+  --docker-platform linux/arm64 \
+  --extra-ldflags=-lstdc++ \
+  --runs 10 \
+  --hyperfine-warmup 3 \
+  --hyperfine-prepare "sync" \
+  --timing-summary \
+  --timing-chart \
+  --pretty```
+
 ## Notes
 
 - If `hyperfine` is missing inside the runtime environment, the benchmark phase tries
